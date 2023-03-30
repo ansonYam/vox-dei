@@ -4,9 +4,13 @@ import os
 import tempfile 
 from queue import Queue
 import whisper
+import argostranslate.translate
 
 model = whisper.load_model("tiny.en")
 audio_queue = Queue()
+
+from_code = "en"
+to_code = "es"
 
 def transcribe_audio():
     while True:
@@ -16,6 +20,8 @@ def transcribe_audio():
             result = model.transcribe(audio_file_path)
             transcription = result["text"]
             print(transcription)
+            translatedText = argostranslate.translate.translate(transcription, from_code, to_code)
+            print(translatedText)
             audio_queue.task_done()
         except Exception as e:
             print(f"Error transcribing file {audio_file_path}: {e}")
@@ -23,17 +29,16 @@ def transcribe_audio():
 def get_audio_chunks():
     # TODO: don't hardcode the URL
     session = Streamlink()
-    stream_url = "https://www.twitch.tv/qtcinderella"
+    stream_url = "https://www.youtube.com/watch?v=S5EJY_xsUds"
     streams = session.streams(stream_url)
     # print(streams)
     if not streams:
         return []
     
-    # we won't always have this available, so switch this for 'worst' and use ffmpeg to convert video to audio
-    audio_stream = streams["audio_only"]
+    stream = streams["worst"]
     max_file_size = 10 * 1024 * 1024  # 10 MB in bytes
     try:
-        fd_stream = audio_stream.open()
+        fd_stream = stream.open()
         with tempfile.TemporaryDirectory() as temp_dir:
             file_count = 0
             file_size = 0
@@ -50,7 +55,7 @@ def get_audio_chunks():
                 file_size += len(chunk)
 
                 # Change the condition below to break after a certain amount of time or data has been processed
-                if file_size > 1024 * 1024:
+                if file_size > 88200:
                     f.close()
                     f = None
                     # Add the new file to the audio queue
@@ -59,11 +64,9 @@ def get_audio_chunks():
             # Close the last file
             if f is not None:
                 f.close()
-    
-    except Streamlink.StreamlinkError as e:
-        print("Encountered a stream error. Re-establishing connection...")
-        get_audio_chunks()
-        
+
+    # TODO: error handling for stream discontinuities (is this a Twitch-only problem? If so, ignore and focus on Yt)
+
     except Exception as e:
         print(f"Error: {e}")
         return []
