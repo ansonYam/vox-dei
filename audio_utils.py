@@ -12,24 +12,27 @@ audio_queue = Queue()
 from_code = "en"
 to_code = "es"
 
+continue_transcription = True
+
 def transcribe_audio():
-    while True:
+    while continue_transcription:
         audio_file_path = audio_queue.get()
         # print(f"Transcribing audio at path: {audio_file_path}")
         try:
             result = model.transcribe(audio_file_path)
             transcription = result["text"]
-            print(transcription)
-            translatedText = argostranslate.translate.translate(transcription, from_code, to_code)
-            print(translatedText)
+            translation = argostranslate.translate.translate(transcription, from_code, to_code)
+            yield transcription, translation
             audio_queue.task_done()
         except Exception as e:
             print(f"Error transcribing file {audio_file_path}: {e}")
 
-def get_audio_chunks():
-    # TODO: don't hardcode the URL
+def stop_transcription():
+    global continue_transcription 
+    continue_transcription = False
+
+def get_audio_chunks(stream_url: str):
     session = Streamlink()
-    stream_url = "https://www.youtube.com/watch?v=S5EJY_xsUds"
     streams = session.streams(stream_url)
     # print(streams)
     if not streams:
