@@ -3,6 +3,7 @@ from functools import partial
 import os
 import tempfile 
 from queue import Queue
+import threading
 import whisper
 import argostranslate.translate
 
@@ -12,10 +13,8 @@ audio_queue = Queue()
 from_code = "en"
 to_code = "es"
 
-continue_transcription = True
-
-def transcribe_audio():
-    while continue_transcription:
+def transcribe_audio(stop_event: threading.Event):
+    while True:
         audio_file_path = audio_queue.get()
         # print(f"Transcribing audio at path: {audio_file_path}")
         try:
@@ -24,25 +23,25 @@ def transcribe_audio():
             translation = argostranslate.translate.translate(transcription, from_code, to_code)
             yield transcription, translation
             audio_queue.task_done()
+        except FileNotFoundError:
+            print(f"Error transcribing file {audio_file_path}: File not found")
         except Exception as e:
             print(f"Error transcribing file {audio_file_path}: {e}")
+        if stop_event.is_set():
+            break
 
-def stop_transcription():
-    global continue_transcription 
-    continue_transcription = False
-
-def get_audio_chunks(stream_url: str):
+def get_audio_chunks(stream_url: str, stop_event: threading.Event):
     session = Streamlink()
     streams = session.streams(stream_url)
     # print(streams)
     if not streams:
-        return []
-    
+        return []    
     stream = streams["worst"]
     max_file_size = 10 * 1024 * 1024  # 10 MB in bytes
     try:
         fd_stream = stream.open()
         with tempfile.TemporaryDirectory() as temp_dir:
+            print(temp_dir)
             file_count = 0
             file_size = 0
             f = None
@@ -63,6 +62,9 @@ def get_audio_chunks(stream_url: str):
                     f = None
                     # Add the new file to the audio queue
                     audio_queue.put(os.path.join(temp_dir, filename))
+
+                if stop_event.is_set():
+                    break
 
             # Close the last file
             if f is not None:
