@@ -20,7 +20,10 @@ model = whisper.load_model("tiny.en")
 audio_queue = Queue()
 audio_thread = None
 transcription_queue = Queue()
-transcription_thread = None
+# transcription_thread = None
+transcription_threads = []
+
+mutex = threading.Lock()
 
 # https://stackoverflow.com/questions/323972/is-there-any-way-to-kill-a-thread
 class StoppableThread(threading.Thread):
@@ -38,7 +41,8 @@ class AudioThread(StoppableThread):
     def __init__(self):
         super().__init__()
         self.stream_url = None
-    
+        self.mutex = mutex
+
     def set_stream_url(self, stream_url):
         self.stream_url = stream_url
 
@@ -59,18 +63,20 @@ class AudioThread(StoppableThread):
                     file_count = 0
                     byte_count = 0
                     f = None
-                    for chunk in iter(partial(fd_stream.read, 81920*2), b""):                        
+                    magic_number = 2097152 # bytes
+                    for chunk in iter(partial(fd_stream.read, magic_number), b""):                        
                         if self.stopped():
                             break
                         # print(f"Read {len(chunk)} bytes of data")
-                        if f is None or byte_count >= 81920 or file_count > 0:
+                        if f is None or byte_count >= magic_number or file_count > 0:
                             if f is not None:
                                 f.close()
                                 input_file = os.path.join(temp_dir, filename)
                                 output_file = os.path.join(temp_dir, f"{file_count}.mp3")
                                 convert_to_mp3(input_file, output_file)
-                                audio_queue.put(output_file)
-                                # print(f"Added {output_file} to queue")
+                                with mutex:
+                                    audio_queue.put(output_file)
+                                    print(f"Added {output_file} to queue")
                             file_count += 1
                             byte_count = 0
                             filename = f"{file_count}.raw"
@@ -86,9 +92,10 @@ class AudioThread(StoppableThread):
                         input_file = os.path.join(temp_dir, filename)
                         output_file = os.path.join(temp_dir, f"{file_count}.mp3")
                         convert_to_mp3(input_file, output_file)
-                        audio_queue.put(output_file)
-                        # print(f"Added {output_file} to queue")
-                                
+                        with mutex:
+                            audio_queue.put(output_file)
+                            print(f"Added {output_file} to queue")
+                                    
             except Exception as e:
                 print(f"Error: {e}")
                 return []
@@ -97,34 +104,39 @@ class TranscriptionThread(StoppableThread):
     def __init__(self):
         super().__init__()
         self.to_code = None
+        self.mutex = mutex
 
     def set_to_code(self, to_code):
         self.to_code = to_code
 
-    def run(self):
+    def run(self):        
         print("Transcription thread started")
         from_code = "en" # english only for now
 
         global audio_queue, transcription_queue
         while not self.stopped():
             try:
-                audio_file = audio_queue.get_nowait()
+                with self.mutex:
+                    audio_file = audio_queue.get_nowait()
+                    # print(f"Transcribing audio at path: {audio_file_path}")
+                try:
+                    result = model.transcribe(audio_file)
+                    transcription = result["text"]
+                    translation = argostranslate.translate.translate(transcription, from_code, self.to_code)
+                    print(transcription, translation)
+                    with self.mutex:
+                        transcription_queue.put((transcription, translation))
+                        # print(f"Currently {transcription_queue.qsize()} item(s) in the queue")
+                    with self.mutex:
+                        audio_queue.task_done()
+                except FileNotFoundError:
+                    print(f"Error: File not found at path {audio_file}")
+                except Exception as e:
+                    print(f"Error transcribing file {audio_file}: {e}")
             except queue.Empty:
                 time.sleep(0.1)
                 continue
-            # print(f"Transcribing audio at path: {audio_file_path}")
-            try:
-                result = model.transcribe(audio_file)
-                transcription = result["text"]
-                translation = argostranslate.translate.translate(transcription, from_code, self.to_code)
-                print(transcription, translation)
-                transcription_queue.put((transcription, translation))
-                print(f"Currently {transcription_queue.qsize()} item(s) in the queue")
-                audio_queue.task_done()
-            except FileNotFoundError:
-                print(f"Error: File not found at path {audio_file}")
-            except Exception as e:
-                print(f"Error transcribing file {audio_file}: {e}")
+
             if self.stopped():
                 break
 
@@ -137,22 +149,19 @@ def convert_to_mp3(input_file, output_file):
         .run()
     )
 
-def generate(transcription_thread, transcription_queue):
+def generate(transcription_queue, mutex):
     while True:
-        # Check if the transcription thread has stopped
-        if transcription_thread.stopped():
-            break
-
         # Attempt to retrieve a transcription from the queue
-        try:
-            transcription, translation = transcription_queue.get_nowait()
-            # Yield the transcription result to the frontend
-            yield f"data: {json.dumps({'transcription': transcription, 'translation': translation})}\n\n"
-            transcription_queue.task_done()
-        except queue.Empty:
-            # If the queue is empty, wait for a short period of time
-            time.sleep(0.1)
-            continue
+        with mutex:
+            try:
+                transcription, translation = transcription_queue.get_nowait()
+                # Yield the transcription result to the frontend
+                yield f"data: {json.dumps({'transcription': transcription, 'translation': translation})}\n\n"
+                transcription_queue.task_done()
+            except queue.Empty:
+                # If the queue is empty, wait for a short period of time
+                time.sleep(0.1)
+                continue
 
 @app.route("/start")
 def start():    
@@ -170,34 +179,32 @@ def start():
     if to_code is None:
         return jsonify({'error': 'Missing required parameter "to_code".'}), 400
 
-    transcription_thread = TranscriptionThread()
-    transcription_thread.set_to_code(to_code=to_code)
-    transcription_thread.start()
-    
-    return jsonify({'message': 'Threads started'})
+    for _ in range(2): # could be more
+        t = TranscriptionThread()
+        t.set_to_code(to_code=to_code)
+        t.start()
+        transcription_threads.append(t)
+
+    return jsonify({'message': 'Threads started'})    
 
 @app.route('/stream')
 def stream():
-    global transcription_thread, transcription_queue
-    if not transcription_thread:
-                return jsonify({'error': 'Transcription thread not started.'}), 400
-    return Response(generate(transcription_thread, transcription_queue), mimetype='text/event-stream')
-
-@app.route('/status')
-def status():
-    global audio_thread, transcription_thread
-    if audio_thread.stopped() and transcription_thread.stopped():
-        return jsonify({'message': 'Both threads stopped'})
-    else:
-        return jsonify({'message': 'At least one thread still running'})
+    global transcription_threads, transcription_queue, mutex
+    if not transcription_threads:
+                return jsonify({'error': 'No transcription threads started.'}), 400
+    return Response(generate(transcription_queue, mutex), mimetype='text/event-stream')
     
 @app.route('/stop')
 def stop():
-    global audio_thread, transcription_thread
+    global audio_thread, transcription_threads, audio_queue, transcription_queue
     if audio_thread is not None:
+        audio_queue.queue.clear()
         audio_thread.stop()
         audio_thread.join()
-    if transcription_thread is not None:
-        transcription_thread.stop()
-        transcription_thread.join()
+    if transcription_threads is not None:
+        transcription_queue.queue.clear()
+        for t in transcription_threads:
+            t.stop()
+            t.join()
+        transcription_threads.clear()
     return jsonify({'message': 'Threads stopped'})
