@@ -63,38 +63,42 @@ class AudioThread(StoppableThread):
                     file_count = 0
                     byte_count = 0
                     f = None
-                    magic_number = 2097152 # bytes
+                    magic_number = 131072 # bytes
+                    chunks = []
                     for chunk in iter(partial(fd_stream.read, magic_number), b""):                        
+                        # for debugging
+                        # print(len(chunk))
                         if self.stopped():
                             break
-                        # print(f"Read {len(chunk)} bytes of data")
-                        if f is None or byte_count >= magic_number or file_count > 0:
+                        chunks.append(chunk)
+                        byte_count += len(chunk)
+                        if byte_count >= magic_number:
                             if f is not None:
                                 f.close()
-                                input_file = os.path.join(temp_dir, filename)
-                                output_file = os.path.join(temp_dir, f"{file_count}.mp3")
-                                convert_to_mp3(input_file, output_file)
-                                with mutex:
-                                    audio_queue.put(output_file)
-                                    print(f"Added {output_file} to queue")
+                            filename = f"{file_count}.raw"
+                            with open(os.path.join(temp_dir, filename), "wb") as f:
+                                f.write(b"".join(chunks))
+                            input_file = os.path.join(temp_dir, filename)
+                            output_file = os.path.join(temp_dir, f"{file_count}.mp3")
+                            convert_to_mp3(input_file, output_file)
+                            with mutex:
+                                audio_queue.put(output_file)
+                                # print(f"Added {output_file} to queue")
                             file_count += 1
                             byte_count = 0
-                            filename = f"{file_count}.raw"
-                            f = open(os.path.join(temp_dir, filename), "wb")
-
-                        f.write(chunk)
-                        byte_count += len(chunk)
-                        # print(f"Wrote {len(chunk)} bytes to file {filename}")
-
-                    # Add the last file to the audio queue
+                            chunks = []
+                    # Write remaining chunks to file and convert to mp3
                     if f is not None:
                         f.close()
-                        input_file = os.path.join(temp_dir, filename)
-                        output_file = os.path.join(temp_dir, f"{file_count}.mp3")
-                        convert_to_mp3(input_file, output_file)
-                        with mutex:
-                            audio_queue.put(output_file)
-                            print(f"Added {output_file} to queue")
+                    filename = f"{file_count}.raw"
+                    with open(os.path.join(temp_dir, filename), "wb") as f:
+                        f.write(b"".join(chunks))
+                    input_file = os.path.join(temp_dir, filename)
+                    output_file = os.path.join(temp_dir, f"{file_count}.mp3")
+                    convert_to_mp3(input_file, output_file)
+                    with mutex:
+                        audio_queue.put(output_file)
+                        # print(f"Added {output_file} to queue")
                                     
             except Exception as e:
                 print(f"Error: {e}")
